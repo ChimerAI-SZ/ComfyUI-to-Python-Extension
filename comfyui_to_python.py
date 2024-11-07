@@ -155,7 +155,7 @@ class LoadOrderDeterminer:
                 class_def.CATEGORY == "loaders"
                 or class_def.FUNCTION in ["encode"]
                 or not any(
-                    isinstance(val, list) for val in self.data[key]["inputs"].values()
+                    isinstance(val, list) for val in self.data[key]["inputs"].values() # all input are not list
                 )
             ):
                 self.is_special_function = True
@@ -313,9 +313,15 @@ class CodeGenerator:
                     )
                 )
             
+            # special cases
             if 'saveimage' in class_type.lower() or 'saveimage' in meta.lower():
                 code.append(
                     f"return_image = {executed_variables[idx]}['ui']['images'][0]['filename']"
+                )
+            
+            if 'chimernodes_httpimage2text' in executed_variables[idx]:
+                special_functions_code.append(
+                    f'{executed_variables[idx]} = {executed_variables[idx]}[0] if isinstance({executed_variables[idx]}[0], list) else {executed_variables[idx]}'
                 )
         
             
