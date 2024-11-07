@@ -463,11 +463,13 @@ class CodeGenerator:
                 - text_join
             - return image's path
         """
-        pdb.set_trace()
+        global_params = self.get_global_params(load_model_code)
+
         function_code = (
             f"class Service:\n\t" + 
             f"def __init__(self):\n\t\t" +
             f"{custom_nodes}\n\t\t" +
+            "global " + ", ".join(global_params) + "\n\t\t" +
             "\n\t\t".join(load_model_code) +
             "\n\t@torch.no_grad()\n" +
             "\n\tdef inference(self): \n\t\t" +  # organize the number of images
@@ -478,7 +480,14 @@ class CodeGenerator:
 
         return function_code
 
+    def get_global_params(self, load_model_code: list[str]) -> list[str]:
+        global_params = []
+        for code in load_model_code:
+            param_name = code.split('=', 1)[0]
+            global_params.append(param_name)
+        return global_params
 
+    
     def get_class_info(self, class_type: str) -> Tuple[str, str, str]:
         """Generates and returns necessary information about class type.
 
