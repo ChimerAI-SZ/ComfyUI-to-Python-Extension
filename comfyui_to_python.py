@@ -9,7 +9,7 @@ import re
 from typing import Dict, List, Any, Callable, Tuple, TextIO
 from argparse import ArgumentParser
 
-import black
+import black, pdb
 
 
 from comfyui_to_python_utils import (
@@ -26,7 +26,7 @@ from nodes import NODE_CLASS_MAPPINGS
 
 DEFAULT_INPUT_FILE = "workflow_api.json"
 DEFAULT_OUTPUT_FILE = "workflow_api.py"
-DEFAULT_QUEUE_SIZE = 10
+DEFAULT_QUEUE_SIZE = 1
 
 
 class FileHandler:
@@ -197,11 +197,12 @@ class CodeGenerator:
             str: Generated execution code as a string.
         """
         # Create the necessary data structures to hold imports and generated code
-        import_statements, executed_variables, special_functions_code, code = (
+        import_statements, executed_variables, special_functions_code, code, load_model_code = (
             set(["NODE_CLASS_MAPPINGS"]),
             {},
             [],
             [],
+            []
         )
         # This dictionary will store the names of the objects that we have already initialized
         initialized_objects = {}
@@ -209,8 +210,17 @@ class CodeGenerator:
         custom_nodes = False
         # Loop over each dictionary in the load order list
         for idx, data, is_special_function in load_order:
+
             # Generate class definition and inputs from the data
             inputs, class_type = data["inputs"], data["class_type"]
+            meta = data['_meta']['title']
+
+            # if 'checkpointloadersimple' in class_type.lower() or 'checkpointloadersimple' in meta.lower():
+            # judge whether the node is a load model node should be put here, as class_type will be reset later
+            is_load_model_node = False
+            if ('load' in class_type.lower() or 'load' in meta.lower()) and 'image' not in class_type.lower():
+                is_load_model_node = True
+
             input_types = self.node_class_mappings[class_type].INPUT_TYPES()
             class_def = self.node_class_mappings[class_type]()
 
@@ -237,7 +247,11 @@ class CodeGenerator:
                     import_statements.add(import_statement)
                 if class_type not in self.base_node_class_mappings.keys():
                     custom_nodes = True
-                special_functions_code.append(class_code)
+                
+                if is_load_model_node:
+                    load_model_code.append(class_code)
+                else:
+                    special_functions_code.append(class_code)
 
             # Get all possible parameters for class_def
             class_def_params = self.get_function_parameters(
@@ -265,7 +279,20 @@ class CodeGenerator:
             executed_variables[idx] = f"{self.clean_variable_name(class_type)}_{idx}"
             inputs = self.update_inputs(inputs, executed_variables)
 
-            if is_special_function:
+            """
+            """
+
+            if is_load_model_node:
+                load_model_code.append(
+                    self.create_function_call_code(
+                        initialized_objects[class_type],
+                        class_def.FUNCTION,
+                        executed_variables[idx],
+                        is_special_function,
+                        **inputs,
+                    )
+                )
+            elif is_special_function:
                 special_functions_code.append(
                     self.create_function_call_code(
                         initialized_objects[class_type],
@@ -285,10 +312,17 @@ class CodeGenerator:
                         **inputs,
                     )
                 )
+            
+            if 'saveimage' in class_type.lower() or 'saveimage' in meta.lower():
+                code.append(
+                    f"return_image = {executed_variables[idx]}['ui']['images'][0]['filename']"
+                )
+        
+            
 
         # Generate final code by combining imports and code, and wrap them in a main function
         final_code = self.assemble_python_code(
-            import_statements, special_functions_code, code, queue_size, custom_nodes
+            import_statements, special_functions_code, code, load_model_code, queue_size, custom_nodes
         )
 
         return final_code
@@ -313,15 +347,17 @@ class CodeGenerator:
         Returns:
             str: The generated Python code.
         """
+        # pdb.set_trace()
         args = ", ".join(self.format_arg(key, value) for key, value in kwargs.items())
 
         # Generate the Python code
-        code = f"{variable_name} = {obj_name}.{func}({args})\n"
+        code = f"{variable_name} = {obj_name}.{func}({args})"
 
         # If the code contains dependencies and is not a loader or encoder, indent the code because it will be placed inside
         # of a for loop
         if not is_special_function:
-            code = f"\t{code}"
+            # code = f"\t{code}"
+            code = f"{code}"
 
         return code
 
@@ -344,11 +380,13 @@ class CodeGenerator:
             return f'{key}={value["variable_name"]}'
         return f"{key}={value}"
 
+
     def assemble_python_code(
         self,
         import_statements: set,
         speical_functions_code: List[str],
         code: List[str],
+        load_model_code: List[str],
         queue_size: int,
         custom_nodes=False,
     ) -> str:
@@ -388,7 +426,7 @@ class CodeGenerator:
         # Check if custom nodes should be included
         if custom_nodes:
             static_imports.append(f"\n{inspect.getsource(import_custom_nodes)}\n")
-            custom_nodes = "import_custom_nodes()\n\t"
+            custom_nodes = "import_custom_nodes()"
         else:
             custom_nodes = ""
         # Create import statements for node classes
@@ -396,13 +434,16 @@ class CodeGenerator:
             f"from nodes import {', '.join([class_name for class_name in import_statements])}"
         ]
         # Assemble the main function code, including custom nodes if applicable
-        main_function_code = (
-            "def main():\n\t"
-            + f"{custom_nodes}with torch.inference_mode():\n\t\t"
-            + "\n\t\t".join(speical_functions_code)
-            + f"\n\n\t\tfor q in range({queue_size}):\n\t\t"
-            + "\n\t\t".join(code)
-        )
+        # main_function_code = (
+        #     "def main():\n\t"
+        #     + f"{custom_nodes}with torch.inference_mode():\n\t\t"
+        #     + "\n\t\t".join(speical_functions_code)
+        #     + f"\n\n\t\tfor q in range({queue_size}):\n\t\t"
+        #     + "\n\t\t".join(code)
+        # )
+        
+        main_function_code = self.organize_function_code(custom_nodes, load_model_code, speical_functions_code, code, queue_size)
+        
         # Concatenate all parts to form the final code
         final_code = "\n".join(
             static_imports
@@ -413,6 +454,30 @@ class CodeGenerator:
         final_code = black.format_str(final_code, mode=black.Mode())
 
         return final_code
+
+    def organize_function_code(self, custom_nodes, load_model_code, special_function_code, code, queue_size=1) -> str:
+        """Organize the function code satisfy the following needs:
+            - class initialization: put all loaders into the __init__
+                also add self. to the variable in the __init__
+            - solve some bug problem
+                - text_join
+            - return image's path
+        """
+        pdb.set_trace()
+        function_code = (
+            f"class Service:\n\t" + 
+            f"def __init__(self):\n\t\t" +
+            f"{custom_nodes}\n\t\t" +
+            "\n\t\t".join(load_model_code) +
+            "\n\t@torch.no_grad()\n" +
+            "\n\tdef inference(self): \n\t\t" +  # organize the number of images
+            "\n\t\t".join(special_function_code) + "\n\t\t" + 
+            "\n\t\t".join(code) +  
+            "\n\t\treturn return_image"
+        )
+
+        return function_code
+
 
     def get_class_info(self, class_type: str) -> Tuple[str, str, str]:
         """Generates and returns necessary information about class type.
@@ -558,9 +623,10 @@ class ComfyUItoPython:
 
         # Step 2: Read JSON data from the input file
         if self.input_file:
-            data = FileHandler.read_json_file(self.input_file)
+            data = FileHandler.read_json_file(self.input_file)  # exactly same as api.json
         else:
             data = json.loads(self.workflow)
+
 
         # Step 3: Determine the load order
         load_order_determiner = LoadOrderDeterminer(data, self.node_class_mappings)
