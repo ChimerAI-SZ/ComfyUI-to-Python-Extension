@@ -197,17 +197,18 @@ class CodeGenerator:
             str: Generated execution code as a string.
         """
         # Create the necessary data structures to hold imports and generated code
-        import_statements, executed_variables, special_functions_code, code, load_model_code = (
+        import_statements, executed_variables, special_functions_code, code = (
             set(["NODE_CLASS_MAPPINGS"]),
             {},
             [],
             [],
-            []
         )
+        load_variables, load_model_code, instance_code = [], [], []
         # This dictionary will store the names of the objects that we have already initialized
         initialized_objects = {}
 
         custom_nodes = False
+        num_load_image_node = 0
         # Loop over each dictionary in the load order list
         for idx, data, is_special_function in load_order:
 
@@ -243,15 +244,17 @@ class CodeGenerator:
                     class_type
                 )
                 initialized_objects[class_type] = self.clean_variable_name(class_type)
-                if class_type in self.base_node_class_mappings.keys():
-                    import_statements.add(import_statement)
+                # if class_type in self.base_node_class_mappings.keys():
+                #     import_statements.add(import_statement)
                 if class_type not in self.base_node_class_mappings.keys():
                     custom_nodes = True
                 
-                if is_load_model_node:
-                    load_model_code.append(class_code)
-                else:
-                    special_functions_code.append(class_code)
+                # if is_load_model_node:
+                #     load_model_code.append(class_code)
+                # else:
+                #     special_functions_code.append(class_code)
+                instance_code.append(class_code)
+                # pdb.set_trace()
 
             # Get all possible parameters for class_def
             class_def_params = self.get_function_parameters(
@@ -276,8 +279,10 @@ class CodeGenerator:
                     inputs["unique_id"] = random.randint(1, 2**64)
 
             # Create executed variable and generate code
-            executed_variables[idx] = f"{self.clean_variable_name(class_type)}_{idx}"
-            inputs = self.update_inputs(inputs, executed_variables)
+            executed_variables[idx] = f"{self.clean_variable_name(class_type)}_{idx}" # checkpointloadersimple_4
+            if is_load_model_node:
+                load_variables.append(executed_variables[idx])
+            inputs = self.update_inputs(inputs, executed_variables, initialized_objects, load_variables)
 
             """
             """
@@ -289,6 +294,8 @@ class CodeGenerator:
                         class_def.FUNCTION,
                         executed_variables[idx],
                         is_special_function,
+                        initialized_objects,
+                        is_load_model_node=True,
                         **inputs,
                     )
                 )
@@ -299,6 +306,7 @@ class CodeGenerator:
                         class_def.FUNCTION,
                         executed_variables[idx],
                         is_special_function,
+                        initialized_objects,
                         **inputs,
                     )
                 )
@@ -309,6 +317,7 @@ class CodeGenerator:
                         class_def.FUNCTION,
                         executed_variables[idx],
                         is_special_function,
+                        initialized_objects,
                         **inputs,
                     )
                 )
@@ -323,12 +332,17 @@ class CodeGenerator:
                 special_functions_code.append(
                     f'{executed_variables[idx]} = {executed_variables[idx]}[0] if isinstance({executed_variables[idx]}[0], list) else {executed_variables[idx]}'
                 )
+            
+            if 'load_image' in class_def.FUNCTION:
+                num_load_image_node += 1
         
             
 
         # Generate final code by combining imports and code, and wrap them in a main function
         final_code = self.assemble_python_code(
-            import_statements, special_functions_code, code, load_model_code, queue_size, custom_nodes
+            import_statements, special_functions_code, 
+            code=code, load_model_code=load_model_code, 
+            instance_code=instance_code, queue_size=queue_size, custom_nodes=custom_nodes
         )
 
         return final_code
@@ -339,6 +353,8 @@ class CodeGenerator:
         func: str,
         variable_name: str,
         is_special_function: bool,
+        initialized_objects,
+        is_load_model_node: bool = False,
         **kwargs,
     ) -> str:
         """Generate Python code for a function call.
@@ -356,7 +372,18 @@ class CodeGenerator:
         # pdb.set_trace()
         args = ", ".join(self.format_arg(key, value) for key, value in kwargs.items())
 
+        # is_obj_class_member = False
+        # for k, v in initialized_objects.items():
+        #     if v == obj_name:
+        #         is_obj_class_member = True
+        #         break
+        # if is_obj_class_member:
+        obj_name = f'self.{obj_name}' if obj_name in initialized_objects.values() else obj_name
+            
+
         # Generate the Python code
+        if is_load_model_node:
+            variable_name = f'self.{variable_name}'
         code = f"{variable_name} = {obj_name}.{func}({args})"
 
         # If the code contains dependencies and is not a loader or encoder, indent the code because it will be placed inside
@@ -393,6 +420,7 @@ class CodeGenerator:
         speical_functions_code: List[str],
         code: List[str],
         load_model_code: List[str],
+        instance_code: List[str],
         queue_size: int,
         custom_nodes=False,
     ) -> str:
@@ -439,29 +467,22 @@ class CodeGenerator:
         imports_code = [
             f"from nodes import {', '.join([class_name for class_name in import_statements])}"
         ]
-        # Assemble the main function code, including custom nodes if applicable
-        # main_function_code = (
-        #     "def main():\n\t"
-        #     + f"{custom_nodes}with torch.inference_mode():\n\t\t"
-        #     + "\n\t\t".join(speical_functions_code)
-        #     + f"\n\n\t\tfor q in range({queue_size}):\n\t\t"
-        #     + "\n\t\t".join(code)
-        # )
         
-        main_function_code = self.organize_function_code(custom_nodes, load_model_code, speical_functions_code, code, queue_size)
+        main_function_code = self.organize_function_code(custom_nodes, instance_code, load_model_code, speical_functions_code, code, queue_size)
         
         # Concatenate all parts to form the final code
         final_code = "\n".join(
             static_imports
             + imports_code
-            + ["", main_function_code, "", 'if __name__ == "__main__":', "\tmain()"]
+            + ["", main_function_code, ""]
+            + ['if __name__ == "__main__":', "\tserivce=Service()", "\tserivce.inference()"]
         )
         # Format the final code according to PEP 8 using the Black library
         final_code = black.format_str(final_code, mode=black.Mode())
 
         return final_code
 
-    def organize_function_code(self, custom_nodes, load_model_code, special_function_code, code, queue_size=1) -> str:
+    def organize_function_code(self, custom_nodes, instance_code, load_model_code, special_function_code, code, queue_size=1) -> str:
         """Organize the function code satisfy the following needs:
             - class initialization: put all loaders into the __init__
                 also add self. to the variable in the __init__
@@ -469,14 +490,15 @@ class CodeGenerator:
                 - text_join
             - return image's path
         """
-        global_params = self.get_global_params(load_model_code)
+        global_params = self.get_global_params(instance_code + load_model_code)
 
         function_code = (
             f"class Service:\n\t" + 
             f"def __init__(self):\n\t\t" +
             f"{custom_nodes}\n\t\t" +
-            "global " + ", ".join(global_params) + "\n\t\t" +
-            "\n\t\t".join(load_model_code) +
+            # "global " + ", ".join(global_params) + "\n\t\t" +
+            "\n\t\t".join(instance_code) + "\n\t\t" + 
+            "\n\t\t".join(load_model_code) + 
             "\n\t@torch.no_grad()\n" +
             "\n\tdef inference(self): \n\t\t" +  # organize the number of images
             "\n\t\t".join(special_function_code) + "\n\t\t" + 
@@ -486,9 +508,9 @@ class CodeGenerator:
 
         return function_code
 
-    def get_global_params(self, load_model_code: list[str]) -> list[str]:
+    def get_global_params(self, code: list[str]) -> list[str]:
         global_params = []
-        for code in load_model_code:
+        for code in code:
             param_name = code.split('=', 1)[0]
             global_params.append(param_name)
         return global_params
@@ -505,10 +527,10 @@ class CodeGenerator:
         """
         import_statement = class_type
         variable_name = self.clean_variable_name(class_type)
-        if class_type in self.base_node_class_mappings.keys():
-            class_code = f"{variable_name} = {class_type.strip()}()"
-        else:
-            class_code = f'{variable_name} = NODE_CLASS_MAPPINGS["{class_type}"]()'
+        # if class_type in self.base_node_class_mappings.keys():
+        #     class_code = f"self.{variable_name} = {class_type.strip()}()"
+        # else:
+        class_code = f'self.{variable_name} = NODE_CLASS_MAPPINGS["{class_type}"]()'
 
         return class_type, import_statement, class_code
 
@@ -555,7 +577,7 @@ class CodeGenerator:
         )
         return list(parameters.keys()) if not catch_all else None
 
-    def update_inputs(self, inputs: Dict, executed_variables: Dict) -> Dict:
+    def update_inputs(self, inputs: Dict, executed_variables: Dict, initialized_objects, load_variables) -> Dict:
         """Update inputs based on the executed variables.
 
         Args:
@@ -570,8 +592,11 @@ class CodeGenerator:
                 isinstance(inputs[key], list)
                 and inputs[key][0] in executed_variables.keys()
             ):
+
+                variable = executed_variables[inputs[key][0]]
+                executed_variable =  f'self.{variable}' if variable in initialized_objects.values() or variable in load_variables else variable
                 inputs[key] = {
-                    "variable_name": f"get_value_at_index({executed_variables[inputs[key][0]]}, {inputs[key][1]})"
+                    "variable_name": f"get_value_at_index({executed_variable}, {inputs[key][1]})"
                 }
         return inputs
 
