@@ -186,6 +186,7 @@ class CodeGenerator:
         self,
         load_order: List,
         queue_size: int = 10,
+        service_name: str = "Service"
     ) -> str:
         """Generate the execution code based on the load order.
 
@@ -234,7 +235,7 @@ class CodeGenerator:
             if missing_required_variable:
                 continue
 
-            # If the class hasn't been initialized yet, initialize it and generate the import statements
+            # Initiliazation Code: If the class hasn't been initialized yet, initialize it and generate the import statements
             if class_type not in initialized_objects:
                 # No need to use preview image nodes since we are executing the script in a terminal
                 if class_type == "PreviewImage":
@@ -249,12 +250,7 @@ class CodeGenerator:
                 if class_type not in self.base_node_class_mappings.keys():
                     custom_nodes = True
                 
-                # if is_load_model_node:
-                #     load_model_code.append(class_code)
-                # else:
-                #     special_functions_code.append(class_code)
                 instance_code.append(class_code)
-                # pdb.set_trace()
 
             # Get all possible parameters for class_def
             class_def_params = self.get_function_parameters(
@@ -342,7 +338,8 @@ class CodeGenerator:
         final_code = self.assemble_python_code(
             import_statements, special_functions_code, 
             code=code, load_model_code=load_model_code, 
-            instance_code=instance_code, queue_size=queue_size, custom_nodes=custom_nodes
+            service_name=service_name,
+            instance_code=instance_code, queue_size=queue_size, custom_nodes=False,
         )
 
         return final_code
@@ -372,12 +369,6 @@ class CodeGenerator:
         # pdb.set_trace()
         args = ", ".join(self.format_arg(key, value) for key, value in kwargs.items())
 
-        # is_obj_class_member = False
-        # for k, v in initialized_objects.items():
-        #     if v == obj_name:
-        #         is_obj_class_member = True
-        #         break
-        # if is_obj_class_member:
         obj_name = f'self.{obj_name}' if obj_name in initialized_objects.values() else obj_name
             
 
@@ -422,6 +413,7 @@ class CodeGenerator:
         load_model_code: List[str],
         instance_code: List[str],
         queue_size: int,
+        service_name: str,
         custom_nodes=False,
     ) -> str:
         """Generates the final code string.
@@ -448,15 +440,17 @@ class CodeGenerator:
         # Define static import statements required for the script
         static_imports = (
             [
-                "import os",
+                # "import os",
                 "import random",
-                "import sys",
-                "from typing import Sequence, Mapping, Any, Union",
+                # "import sys",
+                # "from typing import Sequence, Mapping, Any, Union",
                 "import torch",
+                "from .utils import get_value_at_index"
             ]
-            + func_strings
-            + ["\n\nadd_comfyui_directory_to_sys_path()\nadd_extra_model_paths()\n"]
+            # + func_strings
+            # + ["\n\nadd_comfyui_directory_to_sys_path()\nadd_extra_model_paths()\n"]
         )
+        # custom_nodes = False
         # Check if custom nodes should be included
         if custom_nodes:
             static_imports.append(f"\n{inspect.getsource(import_custom_nodes)}\n")
@@ -468,21 +462,25 @@ class CodeGenerator:
             f"from nodes import {', '.join([class_name for class_name in import_statements])}"
         ]
         
-        main_function_code = self.organize_function_code(custom_nodes, instance_code, load_model_code, speical_functions_code, code, queue_size)
+        main_function_code = self.organize_function_code(
+            custom_nodes, instance_code, load_model_code, 
+            speical_functions_code, code, service_name, queue_size)
         
         # Concatenate all parts to form the final code
         final_code = "\n".join(
             static_imports
-            + imports_code
+            # + imports_code
             + ["", main_function_code, ""]
-            + ['if __name__ == "__main__":', "\tserivce=Service()", "\tserivce.inference()"]
+            + ['if __name__ == "__main__":', "\tfrom time import perf_counter", f"\tserivce={service_name}()" ] 
+            + [ "\tstart_t = perf_counter()", "\tserivce.inference()", "\tprint(f'{perf_counter() - start_t:.2f}')"]
         )
         # Format the final code according to PEP 8 using the Black library
         final_code = black.format_str(final_code, mode=black.Mode())
 
         return final_code
 
-    def organize_function_code(self, custom_nodes, instance_code, load_model_code, special_function_code, code, queue_size=1) -> str:
+    def organize_function_code(self, custom_nodes, instance_code, load_model_code, 
+                               special_function_code, code, service_name, queue_size=1) -> str:
         """Organize the function code satisfy the following needs:
             - class initialization: put all loaders into the __init__
                 also add self. to the variable in the __init__
@@ -493,14 +491,15 @@ class CodeGenerator:
         global_params = self.get_global_params(instance_code + load_model_code)
 
         function_code = (
-            f"class Service:\n\t" + 
-            f"def __init__(self):\n\t\t" +
+            f"class {service_name}:\n\t" + 
+            f"def __init__(self, NODE_CLASS_MAPPINGS):\n\t\t" +
             f"{custom_nodes}\n\t\t" +
             # "global " + ", ".join(global_params) + "\n\t\t" +
             "\n\t\t".join(instance_code) + "\n\t\t" + 
             "\n\t\t".join(load_model_code) + 
+            "\n\t\tself.inference()"
             "\n\t@torch.no_grad()\n" +
-            "\n\tdef inference(self): \n\t\t" +  # organize the number of images
+            "\n\tdef inference(self, *args, **kwargs): \n\t\t" +  # organize the number of images
             "\n\t\t".join(special_function_code) + "\n\t\t" + 
             "\n\t\t".join(code) +  
             "\n\t\treturn return_image"
@@ -664,8 +663,10 @@ class ComfyUItoPython:
         # Step 2: Read JSON data from the input file
         if self.input_file:
             data = FileHandler.read_json_file(self.input_file)  # exactly same as api.json
+            service_name = self.input_file.rsplit('/', 1)[-1].split('.',1)[0]
         else:
             data = json.loads(self.workflow)
+            service_name = 'Service'
 
 
         # Step 3: Determine the load order
@@ -677,7 +678,7 @@ class ComfyUItoPython:
             self.node_class_mappings, self.base_node_class_mappings
         )
         generated_code = code_generator.generate_workflow(
-            load_order, queue_size=self.queue_size
+            load_order, queue_size=self.queue_size, service_name=service_name
         )
 
         # Step 5: Write the generated code to a file
